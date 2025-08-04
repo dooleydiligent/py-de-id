@@ -1,0 +1,46 @@
+'*':
+- field: meta
+  action: erase
+Patient:
+- field: name
+  action: replace
+  params:
+  - family: FamilyName
+    given:
+    - Person
+- field: birthDate
+  action: randomize
+  params:
+    min: -15
+    max: +15
+- field: telecom
+  action: erase
+- field: identifier
+  action: erase
+- field: extension
+  action: merge
+  params:
+  - '[x for x in %input% if "mother" not in x["url"]]'
+  - '[x for x in %input% if "birthPlace" not in x["url"]]'
+- field: address
+  action: merge
+  params:
+  - '[{k: v for k,v in addr.items() if k != "extension"} for addr in %input%]'
+  - '[{k: v if k != "line" else ["101 Pleasant Street"] for k,v in addr.items()} for addr in %input%]'
+  - '[{k: v if k != "postalCode" else v[:2]+"000" for k,v in addr.items()} for addr in %input%]'
+Practitioner:
+- field: identifier
+  action: erase
+- field: name
+  action: replace
+  params:
+  - text: 'The respected provider'
+Device:
+- field: distinctIdentifier
+  action: randomize
+  params:
+    min: 0
+    max: 99099999999999
+- field: lotNumber
+  action: replace
+  params: LOT-123456
