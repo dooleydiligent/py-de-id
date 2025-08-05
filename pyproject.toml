@@ -5,14 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "py-de-id"
 version = "0.1.0"
-description = "A simple Flask application."
+description = "A cherrypy-based fhir R4 deidentifier."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "flask>=2.2",
+    "cherrypy",
     "requests",
     "pyyaml",
-    "networkx"
 ]
 
 [tool.setuptools]
