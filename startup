@@ -10,7 +10,7 @@ handle_shutdown() {
 
 trap "handle_shutdown" SIGTERM
 
-flask run --host 0.0.0.0 --port 5000 &
+python ./py_de_id/py-de-id.py &
 PROC=$!
 
 while true; do
