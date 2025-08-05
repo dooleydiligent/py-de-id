@@ -1,18 +1,17 @@
-from datetime import date
-import threading
-import json
 import os
-import json
 import sys
-import requests
-import yaml
-from uuid import uuid1
-import cherrypy
-from pathlib import Path
-from datetime import timedelta
+import json
+import threading
+import time
 import random
 import string
-import time
+from datetime import date, timedelta
+from pathlib import Path
+from uuid import uuid1
+
+import requests
+import yaml
+import cherrypy
 
 # this file's parent directory
 PROJECT_DIR = (
@@ -23,7 +22,9 @@ is_healthy = False
 if os.path.isdir("/data"):
     base_dir = os.path.join("/data", "input")
 else:
-    base_dir = os.path.join("/tmp", "input")
+    base_dir = os.path.join(PROJECT_DIR, "input")
+
+os.makedirs(base_dir, exist_ok=True)
 
 with open("./assets/config.yaml") as f:
     config = yaml.safe_load(f)
@@ -33,9 +34,7 @@ cherrypy.log(f"config is {config}")
 
 def randomize(field_name, old_value, params):
     if "date" in field_name.lower():
-        cherrypy.log(
-            f"randomize {field_name} using {old_value} and {params}"
-        )
+        cherrypy.log(f"randomize {field_name} using {old_value} and {params}")
         seed = date.fromisoformat(old_value)
         start_date = seed - timedelta(days=params["min"])
         end_date = seed + timedelta(days=params["max"])
@@ -62,9 +61,7 @@ def randomize(field_name, old_value, params):
 def deidentify_fhir_resource(resource):
     del resource["meta"]
     if resource["resourceType"] in config:
-        cherrypy.log(
-            f"Processing rules for {resource['resourceType']}"
-        )
+        cherrypy.log(f"Processing rules for {resource['resourceType']}")
         for key in ["*", resource["resourceType"]]:
             for rule in config[key]:
                 if rule["field"] in resource:
@@ -82,22 +79,17 @@ def deidentify_fhir_resource(resource):
                         )
                     # merge
                     elif rule["action"] == "merge":
-                        cherrypy.log(
-                            f"Processing merge rule {rule}"
-                        )
+                        cherrypy.log(f"Processing merge rule {rule}")
                         input = resource[rule["field"]]
                         for item in rule["params"]:
                             try:
                                 cherrypy.log(
                                     f"Processing param: {item}",
-                                   
                                 )
                                 new_rule = item.replace("%input%", "input")
                                 input = eval(new_rule)
                             except Exception as e:
-                                cherrypy.log(
-                                    f"Exception while processing: {e}"
-                                )
+                                cherrypy.log(f"Exception while processing: {e}")
                         resource[rule["field"]] = input
                     else:
                         print(f"Unknown rule.action {rule}", file=sys.stderr)
@@ -105,9 +97,7 @@ def deidentify_fhir_resource(resource):
 
 
 def deliver_clone(transaction_id):
-    cherrypy.log(
-        f"Delivering clone {base_dir}/{transaction_id}/clone.json"
-    )
+    cherrypy.log(f"Delivering clone {base_dir}/{transaction_id}/clone.json")
 
     # TODO: Almost anything but this
     with open(f"{base_dir}/{transaction_id}.json", "r") as file:
@@ -163,9 +153,7 @@ def deliver_clone(transaction_id):
                 for entry in response["entry"]:
                     if "response" in entry:
                         if entry["response"]["status"] == 201:
-                            cherrypy.log(
-                                f"Created {entry['response']['location']}"
-                            )
+                            cherrypy.log(f"Created {entry['response']['location']}")
                         elif entry["response"]["status"] == 429:
                             diagnostics = json.loads(
                                 entry["response"]["issue"][0]["diagnostics"]
@@ -175,14 +163,10 @@ def deliver_clone(transaction_id):
                                 f"Too many requests. Throttling {throttle_time}",
                             )
                             time.sleep(throttle_time / 1000)
-                            cherrypy.log(
-                                f"Retrying batch {batch_no + 1}"
-                            )
+                            cherrypy.log(f"Retrying batch {batch_no + 1}")
                             status = 429
         else:
-            cherrypy.log(
-                f"Unexpected null result", file=sys.stderr
-            )
+            cherrypy.log(f"Unexpected null result", file=sys.stderr)
 
         if status == 200:
             del newBundleEntry[:15]
@@ -194,7 +178,7 @@ def deliver_clone(transaction_id):
     # Clean up the transaction
 
 
-def clone_bundle(transaction_id):
+def clone_bundle(transaction_id, deid):
     cherrypy.log(f"clone_bundle({transaction_id})")
 
     def replace_reference(obj, referenceMap):
@@ -222,11 +206,10 @@ def clone_bundle(transaction_id):
         for entry in bundleData["entry"]:
             if "resource" not in entry or "id" not in entry["resource"]:
                 # log a warning
-                cherrypy.log(
-                    f"There is no resource in entry {entry}"
-                )
+                cherrypy.log(f"There is no resource in entry {entry}")
             else:
-                entry["resource"] = deidentify_fhir_resource(entry["resource"])
+                if deid:
+                    entry["resource"] = deidentify_fhir_resource(entry["resource"])
 
                 newResourceId = str(uuid1())
 
@@ -255,9 +238,7 @@ def clone_bundle(transaction_id):
 
     with open(f"{base_dir}/{transaction_id}/clone.json", "w") as fileOut:
         json.dump(bundleData, fileOut)
-    cherrypy.log(
-        f"Cloned bundle {base_dir}/{transaction_id}/clone.json"
-    )
+    cherrypy.log(f"Cloned bundle {base_dir}/{transaction_id}/clone.json")
     deliver_clone(transaction_id)
 
 
@@ -293,7 +274,7 @@ def process_request(transaction_id):
             with open(data_file, "w+", encoding="utf-8") as f:
                 f.write(f"{response.text}")
 
-            clone_bundle(transaction_id)
+            clone_bundle(transaction_id, data["deid"])
         else:
             print(
                 f"Request failed with status code: {response.status_code}",
@@ -318,7 +299,6 @@ class Deidentifier(object):
             cherrypy.response.status = 500
             return "There are some issues"
 
-
     @cherrypy.expose
     @cherrypy.tools.json_in()
     @cherrypy.tools.allow(methods=["POST"])
@@ -332,17 +312,13 @@ class Deidentifier(object):
             return json.dumps({"message": "missing transaction_id"})
 
         my_transaction_id = str(uuid1())
-        cherrypy.log(
-            f"Create {base_dir}/{my_transaction_id}.json"
-        )
+        cherrypy.log(f"Create {base_dir}/{my_transaction_id}.json")
         filepath = f"{base_dir}/{my_transaction_id}.json"
         try:
             with open(filepath, "w+", encoding="utf-8") as f:
                 json_str = json.dumps(data)
                 f.write(json_str)
-            cherrypy.log(
-                f"wrote file {my_transaction_id}.json"
-            )
+            cherrypy.log(f"wrote file {my_transaction_id}.json")
 
             fetch_thread = threading.Thread(
                 target=process_request, args=(my_transaction_id,)
@@ -357,14 +333,12 @@ class Deidentifier(object):
         return json.dumps({"message": "OK", "transaction": my_transaction_id})
 
 
-
 if __name__ == "__main__":
 
-    if not "NO_THREADS" in os.environ:
-        try:
-            os.makedirs(base_dir, exist_ok=True)
-        except OSError as e:
-            raise TypeError(f"Error creating directory '{base_dir}': {e}")
+    try:
+        os.makedirs(base_dir, exist_ok=True)
+    except OSError as e:
+        raise TypeError(f"Error creating directory '{base_dir}': {e}")
 
     thread_pool = 10
 
@@ -385,20 +359,18 @@ if __name__ == "__main__":
         Deidentifier(),
         "/",
         {
-        '/health': {
-            'tools.trailing_slash.extra': False
+            "/health": {"tools.trailing_slash.extra": False},
+            "/deidentify": {
+                "tools.json_in.on": True,
+                "tools.json_out.on": True,
+                "tools.allow.methods": ["POST"],
+            },
+            "/favicon.ico": {
+                "tools.staticfile.on": True,
+                "tools.staticdir.root": os.getcwd(),
+                "tools.staticfile.filename": "./assets/favicon.ico",
+            },
         },
-        '/deidentify': {
-            'tools.json_in.on': True,
-            'tools.json_out.on': True,
-            'tools.allow.methods': ['POST'],
-        },
-        "/favicon.ico": {
-            "tools.staticfile.on": True,
-            "tools.staticdir.root": os.getcwd(),
-            "tools.staticfile.filename": "./assets/favicon.ico",
-        },
-      }
     )
 
     cherrypy.log("Starting the engine")
