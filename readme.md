@@ -4,6 +4,63 @@ A python microservice to deidentify fhir resources - made with [CherryPy](https:
 
 - `GET /health` — returns status 200 (healthy) or 503 (unhealthy).
 - `POST /deidentify/:id` — The deidentifier - in the first iteration it only clones the input
+  Payload:
+
+```
+{
+    transaction_id: "The caller's transaction id",
+    fhir_source: "The source url for Patient/:id/$everything",
+    source_token: "The source bearer token",
+    fhir_target: "The target url - where the clone is to be sent",
+    target_token: "The target bearer token",
+    id: "The id of the patient to be cloned",
+    deid: true | false,
+}
+```
+
+If deid is false then the clone is not modified during the operation. Otherwise the $everything Bundle is modified according to the instructions in the configuration
+
+## deidentification rules configuration
+
+Deidentification is accomplished globally (i.e. on every resource) and on a per-resource basis using simple configuration.
+
+Configuration recognizes the following actions:
+
+- erase - completely remove a field from the input Bundle
+- replace - replace a field with a literal value or values
+- randomize - randomize the input value based upon parameters (e.g. replace the birthDate with a random date from -15 to +15 days of the original)
+- merge - use list comprehension to selectively modify the input field
+
+See [config.yaml](./assets/config.yaml) for examples
+
+Payload:
+
+```
+{
+    transaction_id: "The caller's transaction id",
+    fhir_source: "The source url for Patient/:id/$everything",
+    source_token: "The source bearer token",
+    fhir_target: "The target url - where the clone is to be sent",
+    target_token: "The target bearer token",
+    id: "The id of the patient to be cloned",
+    deid: true | false,
+}
+```
+
+If deid is false then the clone is not modified during the operation. Otherwise the $everything Bundle is modified according to the instructions in the configuration
+
+## deidentification rules configuration
+
+Deidentification is accomplished globally (i.e. on every resource) and on a per-resource basis using simple configuration.
+
+Configuration recognizes the following actions:
+
+- erase - completely remove a field from the input Bundle
+- replace - replace a field with a literal value or values
+- randomize - randomize the input value based upon parameters (e.g. replace the birthDate with a random date from -15 to +15 days of the original)
+- merge - use list comprehension to selectively modify the input field
+
+See [config.yaml](./assets/config.yaml) for examples
 
 Payload:
 
