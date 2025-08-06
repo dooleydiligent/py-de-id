@@ -10,7 +10,7 @@ handle_shutdown() {
 
 trap "handle_shutdown" SIGTERM
 
-python ./py_de_id/py-de-id.py &
+python ./py_de_id/pydeid.py &
 PROC=$!
 
 while true; do

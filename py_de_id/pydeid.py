@@ -12,7 +12,7 @@ from uuid import uuid1
 import requests
 import yaml
 import cherrypy
-
+import shutil
 # this file's parent directory
 PROJECT_DIR = (
     Path(Path(__file__).parent.resolve().absolute()).parent.resolve().absolute()
@@ -34,7 +34,6 @@ cherrypy.log(f"config is {config}")
 
 def randomize(field_name, old_value, params):
     if "date" in field_name.lower():
-        cherrypy.log(f"randomize {field_name} using {old_value} and {params}")
         seed = date.fromisoformat(old_value)
         start_date = seed - timedelta(days=params["min"])
         end_date = seed + timedelta(days=params["max"])
@@ -58,10 +57,10 @@ def randomize(field_name, old_value, params):
     return new_str
 
 
-def deidentify_fhir_resource(resource):
+def deidentify_fhir_resource(transaction_id, resource):
     del resource["meta"]
     if resource["resourceType"] in config:
-        cherrypy.log(f"Processing rules for {resource['resourceType']}")
+        cherrypy.log(f"{transaction_id}: Processing rules for {resource['resourceType']}")
         for key in ["*", resource["resourceType"]]:
             for rule in config[key]:
                 if rule["field"] in resource:
@@ -79,7 +78,7 @@ def deidentify_fhir_resource(resource):
                         )
                     # merge
                     elif rule["action"] == "merge":
-                        cherrypy.log(f"Processing merge rule {rule}")
+                        cherrypy.log(f"{transaction_id}: Processing merge rule {rule}")
                         input = resource[rule["field"]]
                         for item in rule["params"]:
                             try:
@@ -89,15 +88,15 @@ def deidentify_fhir_resource(resource):
                                 new_rule = item.replace("%input%", "input")
                                 input = eval(new_rule)
                             except Exception as e:
-                                cherrypy.log(f"Exception while processing: {e}")
+                                cherrypy.log(f"{transaction_id}: Exception while processing: {e}")
                         resource[rule["field"]] = input
                     else:
-                        print(f"Unknown rule.action {rule}", file=sys.stderr)
+                        cherrypy.log(f"{transaction_id}: Unknown rule.action {rule}", file=sys.stderr)
     return resource
 
 
 def deliver_clone(transaction_id):
-    cherrypy.log(f"Delivering clone {base_dir}/{transaction_id}/clone.json")
+    cherrypy.log(f"{transaction_id}: Delivering clone {base_dir}/{transaction_id}/clone.json")
 
     # TODO: Almost anything but this
     with open(f"{base_dir}/{transaction_id}.json", "r") as file:
@@ -109,7 +108,7 @@ def deliver_clone(transaction_id):
         "Content-Type": "application/fhir+json",
     }
 
-    cherrypy.log("Reading the clone")
+    cherrypy.log("{transaction_id}: Reading the clone")
     with open(f"{base_dir}/{transaction_id}/clone.json", "r") as file:
         content = file.read()
         bundle = json.loads(content)
@@ -119,8 +118,8 @@ def deliver_clone(transaction_id):
     newBundleEntry = bundle["entry"]
 
     batch_size = 15
-    print(
-        f"There are {len(newBundleEntry)} resources to post.  ({len(newBundleEntry)} // {batch_size}) + {bool(len(newBundleEntry) % batch_size)}"
+    cherrypy.log(
+        f"{transaction_id}: There are {len(newBundleEntry)} resources to post.  ({len(newBundleEntry)} // {batch_size}) + {bool(len(newBundleEntry) % batch_size)}"
     )
     num_of_batches = (len(newBundleEntry) // batch_size) + bool(
         divmod(len(newBundleEntry), batch_size)
@@ -128,8 +127,8 @@ def deliver_clone(transaction_id):
 
     batch_no = 0
     while len(newBundleEntry) > 0:
-        print(
-            f"Sending batch {batch_no+1} of {num_of_batches} resources to {data['fhir_target'][:-1]}",
+        cherrypy.log(
+            f"{transaction_id}: Sending batch {batch_no+1} of {num_of_batches} resources to {data['fhir_target'][:-1]}",
         )
 
         request = {
@@ -143,30 +142,30 @@ def deliver_clone(transaction_id):
             json=request,
             headers=headers,
         )
-        cherrypy.log(f"result is {result}")
+
         status = result.status_code
 
         response = result.json()
-        # cherrypy.log(f"response is {response}",  level=cherrypy.log.DEBUG)
+        # cherrypy.log(f"{transaction_id}: response is {response}",  level=cherrypy.log.DEBUG)
         if response:
             if "entry" in response:
                 for entry in response["entry"]:
                     if "response" in entry:
                         if entry["response"]["status"] == 201:
-                            cherrypy.log(f"Created {entry['response']['location']}")
+                            cherrypy.log(f"{transaction_id}: Created {entry['response']['location']}")
                         elif entry["response"]["status"] == 429:
                             diagnostics = json.loads(
                                 entry["response"]["issue"][0]["diagnostics"]
                             )
                             throttle_time = diagnostics._msBeforeNext
-                            print(
-                                f"Too many requests. Throttling {throttle_time}",
+                            cherrypy.log(
+                                f"{transaction_id}: Too many requests. Throttling {throttle_time}",
                             )
                             time.sleep(throttle_time / 1000)
-                            cherrypy.log(f"Retrying batch {batch_no + 1}")
+                            cherrypy.log(f"{transaction_id}: Retrying batch {batch_no + 1}")
                             status = 429
         else:
-            cherrypy.log(f"Unexpected null result", file=sys.stderr)
+            cherrypy.log(f"{transaction_id}: Unexpected null result", file=sys.stderr)
 
         if status == 200:
             del newBundleEntry[:15]
@@ -174,12 +173,13 @@ def deliver_clone(transaction_id):
         else:
             newBundleEntry[:0] = request["entry"]
 
-    cherrypy.log(f"The clone was delivered")
+    cherrypy.log(f"{transaction_id}: The clone was delivered")
     # Clean up the transaction
-
+    shutil.rmtree(f"{base_dir}/{transaction_id}")
+    os.remove(f"{base_dir}/{transaction_id}.json")
 
 def clone_bundle(transaction_id, deid):
-    cherrypy.log(f"clone_bundle({transaction_id})")
+    cherrypy.log(f"{transaction_id}: clone_bundle()")
 
     def replace_reference(obj, referenceMap):
         if "reference" in obj and "/" in obj["reference"]:
@@ -187,12 +187,12 @@ def clone_bundle(transaction_id, deid):
 
             if ref not in referenceMap:
                 # log a warning
-                cherrypy.log(f"{ref} not found")
+                cherrypy.log(f"{transaction_id}: {ref} not found")
             else:
                 obj["reference"] = f"{referenceMap[ref]}"
                 if "display" in obj:
                     obj["display"] = f"{referenceMap[ref]}"
-        for key, value in obj.items():
+        for _, value in obj.items():
             if isinstance(value, dict):
                 replace_reference(value, referenceMap)
 
@@ -206,10 +206,10 @@ def clone_bundle(transaction_id, deid):
         for entry in bundleData["entry"]:
             if "resource" not in entry or "id" not in entry["resource"]:
                 # log a warning
-                cherrypy.log(f"There is no resource in entry {entry}")
+                cherrypy.log(f"{transaction_id}: There is no resource in entry {entry}")
             else:
                 if deid:
-                    entry["resource"] = deidentify_fhir_resource(entry["resource"])
+                    entry["resource"] = deidentify_fhir_resource(transaction_id, entry["resource"])
 
                 newResourceId = str(uuid1())
 
@@ -238,7 +238,7 @@ def clone_bundle(transaction_id, deid):
 
     with open(f"{base_dir}/{transaction_id}/clone.json", "w") as fileOut:
         json.dump(bundleData, fileOut)
-    cherrypy.log(f"Cloned bundle {base_dir}/{transaction_id}/clone.json")
+    cherrypy.log(f"{transaction_id}: Cloned bundle {base_dir}/{transaction_id}/clone.json")
     deliver_clone(transaction_id)
 
 
@@ -248,23 +248,23 @@ def process_request(transaction_id):
         filename = f"{base_dir}/{transaction_id}.json"
 
         if not os.path.exists(work_dir):
-            cherrypy.log(f"Preparing {work_dir}")
+            cherrypy.log(f"{transaction_id}: Preparing {work_dir}")
             os.makedirs(work_dir, exist_ok=True)
 
         with open(filename, "r") as file:
             content = file.read()
-            cherrypy.log(f"loaded {content}")
+            cherrypy.log(f"{transaction_id}: loaded {content}")
             data = json.loads(content)
             # Get the $everything bundle
             headers = {
                 "Authorization": f"Bearer {data['source_token']}",
                 "Content-Type": "application/json",
             }
-            print(
-                f"Getting $everything from {data['fhir_source']}",
+            cherrypy.log(
+                f"{transaction_id}: Getting $everything from {data['fhir_source']}",
             )
             response = requests.get(data["fhir_source"], headers=headers)
-            cherrypy.log(f"Got {response}")
+            cherrypy.log(f"{transaction_id}: Got {response}")
         # Check the response status code
         if response.status_code == 200:
             cherrypy.log("Request successful!")
@@ -276,14 +276,14 @@ def process_request(transaction_id):
 
             clone_bundle(transaction_id, data["deid"])
         else:
-            print(
-                f"Request failed with status code: {response.status_code}",
+            cherrypy.log(
+                f"{transaction_id}: Request failed with status code: {response.status_code}",
             )
             cherrypy.log("Response Text: {response.text}")
 
     except requests.exceptions.RequestException as e:
         cherrypy.log(
-            f"An error occurred during the request for job {transaction_id}: {e}"
+            f"{transaction_id}: An error occurred during the request for job {transaction_id}: {e}"
         )
 
 
@@ -312,13 +312,13 @@ class Deidentifier(object):
             return json.dumps({"message": "missing transaction_id"})
 
         my_transaction_id = str(uuid1())
-        cherrypy.log(f"Create {base_dir}/{my_transaction_id}.json")
+        cherrypy.log(f"{transaction_id}: Create {base_dir}/{my_transaction_id}.json")
         filepath = f"{base_dir}/{my_transaction_id}.json"
         try:
             with open(filepath, "w+", encoding="utf-8") as f:
                 json_str = json.dumps(data)
                 f.write(json_str)
-            cherrypy.log(f"wrote file {my_transaction_id}.json")
+            cherrypy.log(f"{transaction_id}: wrote file {my_transaction_id}.json")
 
             fetch_thread = threading.Thread(
                 target=process_request, args=(my_transaction_id,)
