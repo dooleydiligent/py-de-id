@@ -13,6 +13,7 @@ import requests
 import yaml
 import cherrypy
 import shutil
+
 # this file's parent directory
 PROJECT_DIR = (
     Path(Path(__file__).parent.resolve().absolute()).parent.resolve().absolute()
@@ -60,7 +61,9 @@ def randomize(field_name, old_value, params):
 def deidentify_fhir_resource(transaction_id, resource):
     del resource["meta"]
     if resource["resourceType"] in config:
-        cherrypy.log(f"{transaction_id}: Processing rules for {resource['resourceType']}")
+        cherrypy.log(
+            f"{transaction_id}: Processing rules for {resource['resourceType']}"
+        )
         for key in ["*", resource["resourceType"]]:
             for rule in config[key]:
                 if rule["field"] in resource:
@@ -88,15 +91,22 @@ def deidentify_fhir_resource(transaction_id, resource):
                                 new_rule = item.replace("%input%", "input")
                                 input = eval(new_rule)
                             except Exception as e:
-                                cherrypy.log(f"{transaction_id}: Exception while processing: {e}")
+                                cherrypy.log(
+                                    f"{transaction_id}: Exception while processing: {e}"
+                                )
                         resource[rule["field"]] = input
                     else:
-                        cherrypy.log(f"{transaction_id}: Unknown rule.action {rule}", file=sys.stderr)
+                        cherrypy.log(
+                            f"{transaction_id}: Unknown rule.action {rule}",
+                            file=sys.stderr,
+                        )
     return resource
 
 
 def deliver_clone(transaction_id):
-    cherrypy.log(f"{transaction_id}: Delivering clone {base_dir}/{transaction_id}/clone.json")
+    cherrypy.log(
+        f"{transaction_id}: Delivering clone {base_dir}/{transaction_id}/clone.json"
+    )
 
     # TODO: Almost anything but this
     with open(f"{base_dir}/{transaction_id}.json", "r") as file:
@@ -108,7 +118,7 @@ def deliver_clone(transaction_id):
         "Content-Type": "application/fhir+json",
     }
 
-    cherrypy.log("{transaction_id}: Reading the clone")
+    cherrypy.log(f"{transaction_id}: Reading the clone")
     with open(f"{base_dir}/{transaction_id}/clone.json", "r") as file:
         content = file.read()
         bundle = json.loads(content)
@@ -152,7 +162,9 @@ def deliver_clone(transaction_id):
                 for entry in response["entry"]:
                     if "response" in entry:
                         if entry["response"]["status"] == 201:
-                            cherrypy.log(f"{transaction_id}: Created {entry['response']['location']}")
+                            cherrypy.log(
+                                f"{transaction_id}: Created {entry['response']['location']}"
+                            )
                         elif entry["response"]["status"] == 429:
                             diagnostics = json.loads(
                                 entry["response"]["issue"][0]["diagnostics"]
@@ -162,7 +174,9 @@ def deliver_clone(transaction_id):
                                 f"{transaction_id}: Too many requests. Throttling {throttle_time}",
                             )
                             time.sleep(throttle_time / 1000)
-                            cherrypy.log(f"{transaction_id}: Retrying batch {batch_no + 1}")
+                            cherrypy.log(
+                                f"{transaction_id}: Retrying batch {batch_no + 1}"
+                            )
                             status = 429
         else:
             cherrypy.log(f"{transaction_id}: Unexpected null result", file=sys.stderr)
@@ -178,15 +192,38 @@ def deliver_clone(transaction_id):
     shutil.rmtree(f"{base_dir}/{transaction_id}")
     os.remove(f"{base_dir}/{transaction_id}.json")
 
+
 def clone_bundle(transaction_id, deid):
     cherrypy.log(f"{transaction_id}: clone_bundle()")
 
     def replace_reference(obj, referenceMap):
+        new_references = []
         if "reference" in obj and "/" in obj["reference"]:
             ref = obj["reference"]
 
             if ref not in referenceMap:
-                # log a warning
+                # Add these references for data-integrity purposes
+                if (
+                    ref.startswith("Organization/")
+                    or ref.startswith("Practitioner/")
+                    or ref.startswith("Location/")
+                ):
+                    cherrypy.log(f"{transaction_id}: Creating dummy resource for {ref}")
+                    dummy_resource = {
+                        "resourceType": ref.split("/")[0],
+                        "id": str(uuid1()),
+                        "name": f"unknown-{ref.split('/')[0].lower()}",
+                        "identifier": [
+                            {
+                                "system": "my-elixir",
+                                "value": f"unknown-{ref.split('/')[0].lower()}",
+                            }
+                        ],
+                    }
+                    referenceMap[f"{ref}"] = (
+                        f'{dummy_resource["resourceType"]}/{dummy_resource["id"]}'
+                    )
+                    new_references.append(dummy_resource)
                 cherrypy.log(f"{transaction_id}: {ref} not found")
             else:
                 obj["reference"] = f"{referenceMap[ref]}"
@@ -194,7 +231,10 @@ def clone_bundle(transaction_id, deid):
                     obj["display"] = f"{referenceMap[ref]}"
         for _, value in obj.items():
             if isinstance(value, dict):
-                replace_reference(value, referenceMap)
+                child_references = replace_reference(value, referenceMap)
+                if child_references:
+                    new_references.extend(child_references)
+        return new_references
 
     with open(f"{base_dir}/{transaction_id}/bundle.json", "r") as file:
         bundleData = json.load(file)
@@ -209,7 +249,9 @@ def clone_bundle(transaction_id, deid):
                 cherrypy.log(f"{transaction_id}: There is no resource in entry {entry}")
             else:
                 if deid:
-                    entry["resource"] = deidentify_fhir_resource(transaction_id, entry["resource"])
+                    entry["resource"] = deidentify_fhir_resource(
+                        transaction_id, entry["resource"]
+                    )
 
                 newResourceId = str(uuid1())
 
@@ -234,11 +276,16 @@ def clone_bundle(transaction_id, deid):
                 }
 
         for entry in bundleData["entry"]:
-            replace_reference(entry, referenceMap)
+            new_references = replace_reference(entry, referenceMap)
+
+            if new_references:
+                bundleData["entry"].extend(new_references)
 
     with open(f"{base_dir}/{transaction_id}/clone.json", "w") as fileOut:
         json.dump(bundleData, fileOut)
-    cherrypy.log(f"{transaction_id}: Cloned bundle {base_dir}/{transaction_id}/clone.json")
+    cherrypy.log(
+        f"{transaction_id}: Cloned bundle {base_dir}/{transaction_id}/clone.json"
+    )
     deliver_clone(transaction_id)
 
 
@@ -279,7 +326,7 @@ def process_request(transaction_id):
             cherrypy.log(
                 f"{transaction_id}: Request failed with status code: {response.status_code}",
             )
-            cherrypy.log("Response Text: {response.text}")
+            cherrypy.log(f"Response Text: {response.text}")
 
     except requests.exceptions.RequestException as e:
         cherrypy.log(
