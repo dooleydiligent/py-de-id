@@ -35,18 +35,18 @@ Practitioner:
     action: replace
     params:
       - text: 'The respected provider'
-Device:
-  - field: udiCarrier
-    action: replace
-    params:
-      - deviceIdentifier: '12345678901234'
-        carrierHRF: (01)12345678901234(11)221231(17)250101(10)LOT-123456
-  - field: distinctIdentifier
-    action: replace
-    params: '1234567890'
-  - field: lotNumber
-    action: replace
-    params: LOT-123456
-  - field: serialNumber
-    action: replace
-    params: SN-123456
+# Device:
+#   - field: udiCarrier
+#     action: replace
+#     params:
+#       - deviceIdentifier: '12345678901234'
+#         carrierHRF: (01)12345678901234(11)221231(17)250101(10)LOT-123456
+#   - field: distinctIdentifier
+#     action: replace
+#     params: '1234567890'
+#   - field: lotNumber
+#     action: replace
+#     params: LOT-123456
+#   - field: serialNumber
+#     action: replace
+#     params: SN-123456

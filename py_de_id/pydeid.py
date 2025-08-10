@@ -8,6 +8,7 @@ import string
 from datetime import date, timedelta
 from pathlib import Path
 from uuid import uuid1
+import base64
 
 import requests
 import yaml
@@ -128,76 +129,138 @@ def deliver_clone(transaction_id):
     newBundleEntry = bundle["entry"]
 
     batch_size = 15
-    cherrypy.log(
-        f"{transaction_id}: There are {len(newBundleEntry)} resources to post.  ({len(newBundleEntry)} // {batch_size}) + {bool(len(newBundleEntry) % batch_size)}"
-    )
     num_of_batches = (len(newBundleEntry) // batch_size) + bool(
         divmod(len(newBundleEntry), batch_size)
     )
+    cherrypy.log(
+        f"{transaction_id}: There are {len(newBundleEntry)} resources ({num_of_batches} batches) to post.  ({len(newBundleEntry)} // {batch_size}) + {bool(len(newBundleEntry) % batch_size)}"
+    )
 
     batch_no = 0
+    retry_batch = []
+    request = {
+        "resourceType": "Bundle",
+        "type": "transaction",
+    }
+
     while len(newBundleEntry) > 0:
-        cherrypy.log(
-            f"{transaction_id}: Sending batch {batch_no+1} of {num_of_batches} resources to {data['fhir_target'][:-1]}",
-        )
+        if len(retry_batch) > 0:
+            request["entry"] = newBundleEntry[: len(retry_batch)]
+            cherrypy.log(
+                f"{transaction_id}: Resending batch {batch_no+1} of {len(retry_batch)} resources to {data['fhir_target'][:-1]}",
+            )
+            batch_no -= 1
+        else:
+            request["entry"] = newBundleEntry[:batch_size]
+            cherrypy.log(
+                f"{transaction_id}: Sending batch {batch_no+1} of {num_of_batches} resources to {data['fhir_target'][:-1]}",
+            )
 
-        request = {
-            "resourceType": "Bundle",
-            "type": "transaction",
-            "entry": newBundleEntry[:batch_size],
-        }
-
+        retry_batch = []
         result = requests.post(
             f"{data['fhir_target'][:-1]}",
             json=request,
             headers=headers,
         )
 
-        status = result.status_code
-
         response = result.json()
-        # cherrypy.log(f"{transaction_id}: response is {response}",  level=cherrypy.log.DEBUG)
+        # cherrypy.log(f"{transaction_id}: response is {response}")
+        wait_time = 0
         if response:
             if "entry" in response:
+                entry_count = -1
                 for entry in response["entry"]:
+                    # cherrypy.log(f"{transaction_id}: {response['entry']}")
+                    entry_count += 1
                     if "response" in entry:
-                        if entry["response"]["status"] == 201:
+                        if entry["response"]["status"] == "201":
                             cherrypy.log(
-                                f"{transaction_id}: Created {entry['response']['location']}"
+                                f"{transaction_id}:  - Created {entry['response']['location']}"
                             )
-                        elif entry["response"]["status"] == 429:
+                            if entry["resource"]["resourceType"] == "Observation":
+                                if "code" in entry["resource"]:
+                                    cherrypy.log(
+                                        f"{transaction_id}:  -- Observation:{entry['resource']['code']}"
+                                    )
+                                else:
+                                    cherrypy.log(
+                                        f"{transaction_id}:  -- Observation:no-code"
+                                    )
+                        elif entry["response"]["status"] == "429":
                             diagnostics = json.loads(
-                                entry["response"]["issue"][0]["diagnostics"]
+                                entry["response"]["outcome"]["issue"][0]["diagnostics"]
                             )
-                            throttle_time = diagnostics._msBeforeNext
                             cherrypy.log(
-                                f"{transaction_id}: Too many requests. Throttling {throttle_time}",
+                                f"{transaction_id}:  - diagnostics for entry {entry_count + 1}: {diagnostics}"
                             )
-                            time.sleep(throttle_time / 1000)
+
+                            throttle_time = diagnostics["_msBeforeNext"]
+                            wait_time = (
+                                throttle_time
+                                if wait_time < throttle_time
+                                else wait_time
+                            )
                             cherrypy.log(
-                                f"{transaction_id}: Retrying batch {batch_no + 1}"
+                                f"{transaction_id}:  - The entry is: {request['entry'][entry_count]}"
                             )
-                            status = 429
+                            retry_batch.extend(request["entry"][entry_count])
+                        else:
+                            cherrypy.log(
+                                f"{transaction_id}: Unexpected response: {entry}"
+                            )
+                            cherrypy.log(
+                                f"{transaction_id}: The resource was {request['entry'][entry_count]}"
+                            )
+                            # status = entry["response"]["status"]
         else:
             cherrypy.log(f"{transaction_id}: Unexpected null result", file=sys.stderr)
 
-        if status == 200:
-            del newBundleEntry[:15]
+        if len(retry_batch) == 0:
+            del newBundleEntry[: len(request["entry"])]
             batch_no += 1
         else:
-            newBundleEntry[:0] = request["entry"]
+            if wait_time > 0:
+                cherrypy.log(
+                    f"{transaction_id}:  - Too many requests. Throttling {wait_time}",
+                )
+                time.sleep(wait_time / 1000)
+                cherrypy.log(f"{transaction_id}:  - Retrying batch {batch_no + 1}")
+            newBundleEntry[:0] = retry_batch
 
     cherrypy.log(f"{transaction_id}: The clone was delivered")
     # Clean up the transaction
-    shutil.rmtree(f"{base_dir}/{transaction_id}")
-    os.remove(f"{base_dir}/{transaction_id}.json")
+    # shutil.rmtree(f"{base_dir}/{transaction_id}")
+    # os.remove(f"{base_dir}/{transaction_id}.json")
+
+
+def get_attachment(transaction_id, attachment):
+    cherrypy.log(f"{transaction_id}: get_attachment({attachment['url']})")
+    with open(f"{base_dir}/{transaction_id}.json", "r") as file:
+        content = file.read()
+        data = json.loads(content)
+
+    headers = {
+        "Authorization": f"Bearer {data['target_token']}",
+        "Content-Type": attachment["contentType"],
+    }
+
+    return requests.get(
+        attachment["url"],
+        headers=headers,
+    )
 
 
 def clone_bundle(transaction_id, deid):
+    """
+    transaction_id is the one we supplied.
+
+    It will be used as the new patient id for the deidentified bundle.
+
+
+    """
     cherrypy.log(f"{transaction_id}: clone_bundle()")
 
-    def replace_reference(obj, referenceMap):
-        new_references = []
+    def replace_references(obj, referenceMap):
         if "reference" in obj and "/" in obj["reference"]:
             ref = obj["reference"]
 
@@ -208,7 +271,9 @@ def clone_bundle(transaction_id, deid):
                     or ref.startswith("Practitioner/")
                     or ref.startswith("Location/")
                 ):
-                    cherrypy.log(f"{transaction_id}: Creating dummy resource for {ref}")
+                    cherrypy.log(
+                        f"{transaction_id}: Creating placeholder resource for {ref}"
+                    )
                     dummy_resource = {
                         "resourceType": ref.split("/")[0],
                         "id": str(uuid1()),
@@ -223,18 +288,17 @@ def clone_bundle(transaction_id, deid):
                     referenceMap[f"{ref}"] = (
                         f'{dummy_resource["resourceType"]}/{dummy_resource["id"]}'
                     )
-                    new_references.append(dummy_resource)
+
                 cherrypy.log(f"{transaction_id}: {ref} not found")
             else:
                 obj["reference"] = f"{referenceMap[ref]}"
                 if "display" in obj:
                     obj["display"] = f"{referenceMap[ref]}"
-        for _, value in obj.items():
+        for key, value in obj.items():
             if isinstance(value, dict):
-                child_references = replace_reference(value, referenceMap)
-                if child_references:
-                    new_references.extend(child_references)
-        return new_references
+                if key == 'derivedFrom':
+                    cherrypy.log(f"{transaction_id}: Found derivedFrom with {value}")
+                replace_references(value, referenceMap)
 
     with open(f"{base_dir}/{transaction_id}/bundle.json", "r") as file:
         bundleData = json.load(file)
@@ -252,16 +316,14 @@ def clone_bundle(transaction_id, deid):
                     entry["resource"] = deidentify_fhir_resource(
                         transaction_id, entry["resource"]
                     )
-
-                newResourceId = str(uuid1())
+                if entry["resource"]["resourceType"] == "Patient":
+                    newResourceId = transaction_id
+                else:
+                    newResourceId = str(uuid1())
 
                 referenceMap[
                     f'{entry["resource"]["resourceType"]}/{entry["resource"]["id"]}'
                 ] = f'{entry["resource"]["resourceType"]}/{newResourceId}'
-
-                referenceMap[f'{entry["resource"]["resourceType"]}/{newResourceId}'] = (
-                    f'{entry["resource"]["resourceType"]}/{entry["resource"]["id"]}'
-                )
 
                 entry["resource"]["id"] = newResourceId
 
@@ -275,11 +337,44 @@ def clone_bundle(transaction_id, deid):
                     "url": f"{entry['resource']['resourceType']}",
                 }
 
-        for entry in bundleData["entry"]:
-            new_references = replace_reference(entry, referenceMap)
+                if (
+                    entry["resource"]["resourceType"] == "DocumentReference"
+                    and "content" in entry["resource"]
+                ):
+                    for content in entry["resource"]["content"]:
+                        if "attachment" in content:
+                            attachment = content["attachment"]
+                            if (
+                                "url" in attachment
+                                and "title" in attachment
+                                and "contentType" in attachment
+                            ):
+                                # Retrieve the attachment url and convert to base64
+                                try:
+                                    cherrypy.log(
+                                        f"{transaction_id}: Fetching attachment {attachment['url']}"
+                                    )
+                                    response = get_attachment(
+                                        transaction_id, attachment
+                                    )
+                                    if response.status_code == 200:
+                                        encoded_content = base64.b64encode(
+                                            response.content
+                                        ).decode("utf-8")
+                                        attachment["data"] = encoded_content
+                                        del attachment["url"]
+                                    else:
+                                        cherrypy.log(
+                                            f"{transaction_id}: Failed to fetch attachment {attachment['url']}: {response.status_code}"
+                                        )
+                                except Exception as e:
+                                    cherrypy.log(
+                                        f"{transaction_id}: Exception fetching attachment {attachment['url']}: {e}"
+                                    )
 
-            if new_references:
-                bundleData["entry"].extend(new_references)
+        for entry in bundleData["entry"]:
+            cherrypy.log(f"{transaction_id}: Replacing references in {entry['resource']['resourceType']}/{entry['resource']['id']}")
+            replace_references(entry, referenceMap)
 
     with open(f"{base_dir}/{transaction_id}/clone.json", "w") as fileOut:
         json.dump(bundleData, fileOut)
@@ -290,6 +385,11 @@ def clone_bundle(transaction_id, deid):
 
 
 def process_request(transaction_id):
+    """
+    transaction_id is the one we supplied.
+
+    It will be used as the new patient id in the deidentified bundle.
+    """
     try:
         work_dir = f"{base_dir}/{transaction_id}"
         filename = f"{base_dir}/{transaction_id}.json"
@@ -318,9 +418,20 @@ def process_request(transaction_id):
 
             # save the data
             data_file = os.path.join(work_dir, "bundle.json")
+            bundle = response.json()
+            # Remove entries with resourceType 'AuditEvent'
+            if "entry" in bundle:
+                bundle["entry"] = [
+                    entry
+                    for entry in bundle["entry"]
+                    if entry.get("resource", {}).get("resourceType") != "AuditEvent"
+                    and entry.get("resource", {}).get("resourceType") != "Subscription"
+                ]
             with open(data_file, "w+", encoding="utf-8") as f:
-                f.write(f"{response.text}")
-
+                json.dump(bundle, f)
+            cherrypy.log(
+                f"{transaction_id}: Saved {len(bundle['entry'])} resources to {data_file}"
+            )
             clone_bundle(transaction_id, data["deid"])
         else:
             cherrypy.log(
@@ -335,7 +446,16 @@ def process_request(transaction_id):
 
 
 class Deidentifier(object):
-    """Deidentifier"""
+    """
+    Deidentifier
+
+    The sender provides a transaction_id.  We return our transaction_id.
+
+    We save the sender's input under our transaction_id number.
+
+    Our transaction_id number becomes the new patient id for the deidentified bundle.
+
+    """
 
     @cherrypy.expose()
     def health(self):
@@ -377,7 +497,7 @@ class Deidentifier(object):
             is_healthy = False
             cherrypy.log("Failed to save the object to disk.")
 
-        return json.dumps({"message": "OK", "transaction": my_transaction_id})
+        return {"message": "OK", "transaction": my_transaction_id}
 
 
 if __name__ == "__main__":
